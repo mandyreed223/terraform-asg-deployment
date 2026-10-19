@@ -1,8 +1,8 @@
 # ☁️ Terraform Auto Scaling Web Application on AWS
 
-A highly available AWS web application built with **Terraform**, using an **Application Load Balancer**, **Auto Scaling Group**, private EC2 instances across multiple Availability Zones, secure administration through **AWS Systems Manager Session Manager**, and an encrypted **S3 remote backend** for Terraform state.
+A highly available **application-tier AWS web architecture** built with Terraform, featuring an Application Load Balancer, Auto Scaling Group, private EC2 instances across multiple Availability Zones, secure administration through AWS Systems Manager Session Manager, and an encrypted S3 remote backend for Terraform state.
 
-This project started as an Auto Scaling deployment and turned into something even more valuable: a real troubleshooting exercise involving failed health checks, cloud-init, user data, Launch Template versions, instance replacement, secure private-instance access, and Terraform state management.
+This project started as an Auto Scaling deployment and turned into something even more valuable: a real troubleshooting exercise involving failed health checks, cloud-init, user data, Launch Template versions, instance replacement, secure private-instance access, Terraform resource linkage, and remote state management.
 
 > 🟢 **Green Means GO!**
 
@@ -66,7 +66,7 @@ The deployment includes:
 ## 🧰 Technologies Used
 
 | Technology | Purpose |
-| --- | --- |
+|---|---|
 | Terraform | Infrastructure as Code |
 | AWS VPC | Network isolation and routing |
 | Amazon EC2 | Apache web servers |
@@ -94,7 +94,7 @@ The custom VPC uses:
 and spans two Availability Zones in `us-east-1`.
 
 | Subnet | CIDR | Purpose |
-| --- | --- | --- |
+|---|---|---|
 | Public Subnet 1 | `10.0.1.0/24` | ALB + NAT Gateway |
 | Public Subnet 2 | `10.0.2.0/24` | ALB |
 | Private Subnet 1 | `10.0.11.0/24` | ASG EC2 instances |
@@ -116,7 +116,7 @@ The internet-facing Application Load Balancer spans both public subnets.
 
 The EC2 instances do not receive public IP addresses.
 
-A NAT Gateway in **Public Subnet 1** provides outbound internet access for the private subnets:
+A NAT Gateway in Public Subnet 1 provides outbound internet access for both private subnets:
 
 ```text
 Private EC2
@@ -133,6 +133,44 @@ Internet
 ```
 
 This allows the private instances to install packages and reach external services without exposing them directly to inbound internet traffic.
+
+---
+
+# ⚖️ Architecture Tradeoff: Single NAT Gateway
+
+This project uses **one NAT Gateway in Public Subnet 1** to provide outbound internet access for instances in both private subnets.
+
+For a learning environment, this design reduces cost while still allowing me to practice private subnet routing and NAT-based outbound connectivity.
+
+There is an important availability tradeoff, however.
+
+Although the **application tier** is distributed across two Availability Zones, the single NAT Gateway creates a single-AZ dependency for private-subnet outbound internet connectivity.
+
+```text
+Private Subnet 1 ─┐
+                  ├──→ NAT Gateway in AZ 1 ──→ Internet
+Private Subnet 2 ─┘
+```
+
+For a production architecture requiring stronger multi-AZ resilience, I would deploy **one NAT Gateway per Availability Zone** and route each private subnet through the NAT Gateway in its own AZ.
+
+```text
+Private Subnet AZ 1
+        ↓
+NAT Gateway AZ 1
+        ↓
+Internet
+
+Private Subnet AZ 2
+        ↓
+NAT Gateway AZ 2
+        ↓
+Internet
+```
+
+This would remove the cross-AZ NAT dependency and improve outbound-path resilience at the cost of an additional NAT Gateway.
+
+Understanding that tradeoff was an important part of treating this as more than simply a lab deployment.
 
 ---
 
@@ -162,7 +200,7 @@ Outbound:
 All traffic
 ```
 
-Instead of allowing EC2 port 80 from the entire internet, the EC2 security group references the **ALB security group**.
+Instead of allowing EC2 port 80 from the entire internet, the EC2 security group references the ALB security group.
 
 The resulting path is:
 
@@ -179,6 +217,8 @@ Apache
 ```
 
 Only web traffic coming through the load balancer can reach Apache on the private instances.
+
+Administrative access does not require opening SSH port 22. AWS Systems Manager Session Manager provides secure access through the EC2 IAM instance profile.
 
 ---
 
@@ -214,7 +254,7 @@ aws_vpc.main.id
 
 and passes it into the security group.
 
-This same pattern connects the architecture together.
+This same **resource → attribute → consumer** pattern connects the architecture together.
 
 ### VPC → Subnets
 
@@ -321,7 +361,7 @@ iam_instance_profile {
 }
 ```
 
-These references also create **implicit dependencies**, allowing Terraform to determine much of the correct resource creation order automatically.
+These references do more than pass values. They also create **implicit dependencies**, allowing Terraform to determine much of the correct resource creation order automatically.
 
 ---
 
@@ -347,9 +387,9 @@ Maximum: 5
 
 and launches instances across both private subnets.
 
-This maintains two instances during normal operation while allowing the group to scale as high as five instances.
+![Healthy ASG Instances](screenshots/02-asg-healthy-multi-az-instances.png)
 
-![Healthy Auto Scaling instances](screenshots/02-asg-healthy-multi-az-instances.png)
+This maintains two instances during normal operation while allowing the group to scale as high as five instances.
 
 ---
 
@@ -367,7 +407,13 @@ The Launch Template loads the script using:
 user_data = base64encode(file("${path.module}/user_data.sh"))
 ```
 
-The script installs Apache, enables the service, starts it, and creates the project landing page.
+The script:
+
+1. Updates the operating system packages
+2. Installs Apache
+3. Enables Apache at boot
+4. Starts the Apache service
+5. Creates the project landing page
 
 Separating the bootstrap script from `main.tf` keeps the Terraform configuration cleaner and makes the user data easier to inspect and troubleshoot.
 
@@ -432,6 +478,8 @@ NAT Gateway
 Public Subnet
       ↓
 Internet Gateway
+      ↓
+Internet
 ```
 
 The NAT Gateway was available.
@@ -488,7 +536,7 @@ Replacement receives same configuration
 Failure repeats
 ```
 
-Replacing infrastructure does not fix a bad launch configuration.
+**Replacing infrastructure does not fix a bad launch configuration.**
 
 ---
 
@@ -568,15 +616,13 @@ I inspected the actual script received by the instance:
 sudo head -5 /var/lib/cloud/instance/scripts/part-001 | cat -A
 ```
 
-The output revealed:
+The output revealed whitespace before the shebang:
 
 ```text
  #!/bin/bash
- dnf update -y
- dnf install -y httpd
+    dnf update -y
+    dnf install -y httpd
 ```
-
-There was whitespace before the shebang.
 
 The script needed to begin directly with:
 
@@ -604,7 +650,7 @@ Replacement receives same broken user data
 Cycle repeats
 ```
 
-We had reached the root cause.
+We had reached the root cause. 🎯
 
 ---
 
@@ -636,21 +682,21 @@ I therefore initiated an **Auto Scaling Instance Refresh**.
 
 The refresh gradually replaced the existing instances with instances launched from version 3 of the template.
 
-![Launch Template v3 instance refresh](screenshots/03-launch-template-v3-instance-refresh-success.png)
+![Launch Template v3 Instance Refresh](screenshots/03-launch-template-v3-instance-refresh-success.png)
 
 After the refresh completed, the Auto Scaling Group showed two healthy `InService` instances running Launch Template version 3.
 
-The Target Group then reported both instances:
+The Target Group then reported both instances as:
 
 ```text
 healthy
 ```
 
-![Healthy ALB targets](screenshots/04-alb-targets-healthy-after-self-healing.png)
+![Healthy ALB Targets](screenshots/04-alb-targets-healthy-after-self-healing.png)
 
 And the application finally loaded successfully through the ALB DNS name.
 
-![Terraform ASG application](screenshots/01-terraform-asg-application-success.png)
+![Application Success](screenshots/01-terraform-asg-application-success.png)
 
 ## 🟢 Green Means GO!
 
@@ -684,17 +730,17 @@ Healthy Capacity = 2
 
 During the test, the original instance transitioned to `Terminating` while the replacement instance entered `Pending`.
 
-AWS scaling activity then confirmed that a replacement EC2 instance had been launched.
+AWS scaling activity confirmed that a replacement EC2 instance had been launched.
 
-![Auto Scaling self-healing activity](screenshots/05-asg-self-healing-scaling-activities.png)
+![ASG Self-Healing Activity](screenshots/05-asg-self-healing-scaling-activities.png)
 
-The replacement eventually registered as healthy in the Target Group:
+The replacement eventually registered as healthy in the Target Group.
 
-![Healthy targets after self-healing](screenshots/04-alb-targets-healthy-after-self-healing.png)
+![Healthy Targets After Self-Healing](screenshots/04-alb-targets-healthy-after-self-healing.png)
 
 The test demonstrated that the architecture wasn't simply running two EC2 instances.
 
-The **Auto Scaling Group was actively maintaining the desired state of the application infrastructure.**
+**The Auto Scaling Group was actively maintaining the desired state of the application infrastructure.**
 
 ---
 
@@ -734,6 +780,8 @@ with the state stored at:
 terraform-asg/terraform.tfstate
 ```
 
+![S3 Remote Terraform State](screenshots/06-s3-remote-terraform-state.png)
+
 ---
 
 ## 🪣 Backend Configuration
@@ -758,8 +806,6 @@ terraform init -migrate-state
 
 The state object was then verified in S3.
 
-![Terraform remote state in S3](screenshots/06-s3-remote-terraform-state.png)
-
 ---
 
 # 🔒 Protecting Terraform State
@@ -779,9 +825,7 @@ BlockPublicPolicy     = true
 RestrictPublicBuckets = true
 ```
 
-![S3 public access blocked](screenshots/08-s3-public-access-blocked.png)
-
----
+![S3 Public Access Block](screenshots/08-s3-public-access-blocked.png)
 
 ## Server-Side Encryption
 
@@ -791,17 +835,13 @@ The bucket uses S3 server-side encryption:
 AES256
 ```
 
-![S3 state encryption](screenshots/09-s3-state-encryption-aes256.png)
-
----
+![S3 State Encryption](screenshots/09-s3-state-encryption-aes256.png)
 
 ## Versioning
 
 S3 versioning is enabled.
 
 This allows previous versions of the Terraform state object to be retained, providing additional recovery protection if the state object is accidentally overwritten or corrupted.
-
----
 
 ## State Locking
 
@@ -813,7 +853,7 @@ use_lockfile = true
 
 State locking helps prevent multiple Terraform operations from modifying the same state simultaneously.
 
-This is especially important when Infrastructure as Code is managed collaboratively.
+This becomes especially important when Infrastructure as Code is managed collaboratively.
 
 ---
 
@@ -838,7 +878,7 @@ The result:
 No changes. Your infrastructure matches the configuration.
 ```
 
-![Terraform plan no changes](screenshots/07-terraform-plan-no-changes.png)
+![Terraform Plan No Changes](screenshots/07-terraform-plan-no-changes.png)
 
 That confirmed:
 
@@ -884,173 +924,76 @@ terraform-asg-deployment/
     └── 09-s3-state-encryption-aes256.png
 ```
 
-The following are intentionally excluded from version control:
-
-```text
-.terraform/
-*.tfstate
-*.tfstate.*
-tfplan
-*.tfplan
-*.tfvars
-*.tfvars.json
-```
-
-The `.terraform.lock.hcl` file **is committed** so the repository retains the Terraform provider dependency selections and checksums.
+Terraform state, local variable values, plan files, and the `.terraform` directory are intentionally excluded from source control.
 
 ---
 
 # 🧠 What I Learned
 
-This project reinforced several concepts that go beyond simply getting Terraform to deploy successfully.
+This project reinforced much more than simply creating AWS resources with Terraform.
 
-## 🔗 Terraform Resources Are Connected by Values
+### Terraform
 
-Terraform resources aren't isolated blocks of configuration.
+- Resource references connect infrastructure together
+- Terraform attributes pass values between resources
+- References create implicit dependencies
+- Launch Template changes can create new versions without automatically replacing existing instances
+- Instance Refresh can roll updated Launch Template configurations through an Auto Scaling Group
+- Remote state separates Terraform state from the local workstation
+- State locking helps protect shared infrastructure workflows
 
-Values flow between them:
+### AWS Networking
 
-```text
-Resource
-   ↓
-Attribute
-   ↓
-Another Resource
-```
+- Public and private subnets serve different purposes
+- Internet Gateways provide internet connectivity for public subnet routing
+- NAT Gateways provide outbound connectivity for private instances
+- A single NAT Gateway can reduce cost but creates an availability tradeoff
+- Multi-AZ design must be evaluated across the entire dependency path, not just the EC2 layer
 
-For example:
+### Security
 
-```text
-aws_vpc.main.id
-        ↓
-Subnets
-Security Groups
-Target Group
-```
+- Private EC2 instances do not need public IP addresses
+- EC2 security groups can trust the ALB security group instead of the entire internet
+- Systems Manager Session Manager allows private-instance administration without inbound SSH
+- IAM roles and instance profiles provide AWS permissions to EC2 instances
+- Terraform state should be protected because it can contain infrastructure details and sensitive values
 
-and:
+### Auto Scaling
 
-```text
-aws_lb_target_group.web.arn
-        ↓
-ALB Listener
-Auto Scaling Group
-```
+- Desired capacity represents the state AWS should maintain
+- Auto Scaling can replace unhealthy or terminated instances automatically
+- A healthy ASG does not necessarily mean the application itself is healthy
+- Replacing instances will reproduce a broken configuration if the Launch Template itself is the problem
 
-Understanding these relationships made it much easier to reason about both the Terraform configuration and the resulting AWS architecture.
+### Troubleshooting
 
----
-
-## 🩺 Infrastructure Health Is Not Application Health
-
-An EC2 instance can be:
+The biggest lesson was to follow the request path and let the evidence narrow the problem:
 
 ```text
-Running
-Healthy to EC2
-InService in the ASG
+ALB unhealthy
+    ↓
+Check SG path
+    ↓
+Check subnet placement
+    ↓
+Check NAT and routes
+    ↓
+Check instance
+    ↓
+Apache missing
+    ↓
+Check cloud-init
+    ↓
+scripts-user failed
+    ↓
+Inspect actual user data
+    ↓
+Find malformed script
+    ↓
+Fix root cause
 ```
 
-while the application running on it is still broken.
-
-The EC2 instances existed and Auto Scaling was functioning, but Apache had never been installed.
-
-The ALB Target Group health checks exposed the application-layer failure.
-
----
-
-## ♻️ Auto Scaling Is Only as Good as Its Launch Configuration
-
-The Auto Scaling Group did exactly what it was designed to do.
-
-It detected unhealthy instances and replaced them.
-
-But:
-
-```text
-Broken Launch Template
-        +
-Automatic Replacement
-        =
-More identically broken instances
-```
-
-Self-healing infrastructure still depends on a healthy, repeatable launch configuration.
-
----
-
-## 🔎 Troubleshoot the Whole Path
-
-This project reinforced the troubleshooting method I want to continue using in cloud environments:
-
-```text
-Start with the symptom
-        ↓
-Follow the request path
-        ↓
-Verify each layer
-        ↓
-Collect evidence
-        ↓
-Eliminate healthy layers
-        ↓
-Find the failing layer
-        ↓
-Fix the root cause
-        ↓
-Validate end-to-end
-```
-
-Instead of randomly changing security groups, routes, or instances, each check narrowed the problem.
-
----
-
-## 🔐 Secure Administration Doesn't Require SSH
-
-AWS Systems Manager Session Manager allowed me to troubleshoot private EC2 instances without:
-
-- Opening port 22
-- Assigning public IP addresses
-- Managing SSH keys
-
-The IAM relationship was:
-
-```text
-EC2
- ↓
-Instance Profile
- ↓
-IAM Role
- ↓
-AmazonSSMManagedInstanceCore
- ↓
-Systems Manager
-```
-
-This provided a much more secure administrative path into the private instances.
-
----
-
-## 🗃️ Terraform State Is Part of the Infrastructure
-
-Remote state isn't just a Terraform configuration detail.
-
-Terraform state is what maps:
-
-```text
-Terraform resource
-        ↕
-Actual AWS resource
-```
-
-Moving state to S3 introduced concepts that matter in real Infrastructure as Code workflows:
-
-- Shared state
-- Encryption
-- Versioning
-- Public access protection
-- State locking
-- State migration
+Instead of randomly changing infrastructure, I worked through the architecture layer by layer until the failure pointed to the actual root cause.
 
 ---
 
@@ -1058,33 +1001,30 @@ Moving state to S3 introduced concepts that matter in real Infrastructure as Cod
 
 The completed project demonstrates:
 
-```text
-Infrastructure as Code          ✅
-Custom VPC                      ✅
-Multi-AZ architecture           ✅
-Public/private subnet design    ✅
-Private EC2 instances           ✅
-Application Load Balancing      ✅
-Auto Scaling                    ✅
-ALB health checks               ✅
-Self-healing                    ✅
-Launch Template versioning      ✅
-Instance refresh                ✅
-Secure SSM administration       ✅
-No SSH exposure                 ✅
-Remote Terraform state          ✅
-State encryption                ✅
-State versioning                ✅
-State locking                   ✅
-Intentional failure testing     ✅
-Root-cause troubleshooting      ✅
-End-to-end validation           ✅
-```
+- ✅ Terraform Infrastructure as Code
+- ✅ Custom AWS VPC
+- ✅ Multi-AZ application architecture
+- ✅ Public Application Load Balancer
+- ✅ Private EC2 instances
+- ✅ Security group-to-security group access
+- ✅ Auto Scaling across two Availability Zones
+- ✅ Application health checks
+- ✅ Auto Scaling self-healing
+- ✅ Launch Template versioning
+- ✅ Auto Scaling Instance Refresh
+- ✅ Secure Systems Manager access
+- ✅ No inbound SSH requirement
+- ✅ Apache bootstrap automation
+- ✅ S3 remote Terraform state
+- ✅ S3 versioning
+- ✅ Server-side encryption
+- ✅ Public access blocking
+- ✅ Terraform state locking
+- ✅ Root-cause troubleshooting
+- ✅ Infrastructure validation with `terraform plan`
 
-What began as a Terraform Auto Scaling deployment became a much better exercise in understanding how **networking, load balancing, Auto Scaling, EC2 bootstrap configuration, IAM, Systems Manager, Terraform resource linkage, and remote state all work together**.
+The infrastructure was not considered complete simply because `terraform apply` succeeded.
 
-Most importantly, the project reinforced that a successful Terraform deployment doesn't automatically mean the application is healthy.
+It was complete when I could **build it, explain how the resources connected, break it intentionally, troubleshoot a real failure, fix the root cause, test self-healing, and validate the final state.**
 
-Sometimes you have to follow the evidence all the way down to one tiny space before:
-
-# 🟢 Green Means GO!
+## 🟢 Green Means GO!
